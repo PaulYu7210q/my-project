@@ -1,0 +1,32 @@
+name: WinRunner Relay
+
+on:
+  workflow_run:
+    workflows: ["Run Service"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: relay-group
+  cancel-in-progress: true
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Wait before next run
+        run: sleep 30
+
+      - name: Trigger next run
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.PRIVATE_REPO_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            -d '{"ref":"main"}' \
+            "https://api.github.com/repos/${{ github.repository_owner }}/${{ github.event.repository.name }}/actions/workflows/run.yml/dispatches"
+          echo "✓ Next WinRunner run triggered"
