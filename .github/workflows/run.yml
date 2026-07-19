@@ -179,6 +179,18 @@ jobs:
             400) echo "[*] admin password already configured" ;;
             *) echo "[!] admin setup failed (HTTP $status)"; cat /tmp/admin-setup.json; exit 1 ;;
           esac
+          # Seed DeployTools as default mail provider (no API key required).
+          token=$(curl -sS -X POST http://127.0.0.1:3000/admin/api/login \
+            -H "Content-Type: application/json" --data "$payload" \
+            | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('token',''))
+except Exception: print('')")
+          [ -n "$token" ] || { echo "[!] admin login failed — cannot seed DeployTools"; exit 1; }
+          seed='{"mail_provider":"deploytools","deploytools_base_url":"https://deploytools.site","deploytools_api_key":"","deploytools_domain":"","captcha_provider":"local","local_solver_url":"http://127.0.0.1:5072","proxy":"socks5://127.0.0.1:40000","proxy_strategy":"round_robin","count":1,"concurrency":3}'
+          curl -sS -X PUT http://127.0.0.1:3000/admin/api/accounts/register-email/config \
+            -H "X-Admin-Token: $token" -H "Content-Type: application/json" \
+            --data "$seed" | head -c 400; echo
+          echo "[*] DeployTools registration config seeded"
           echo "[*] accounts=$(PGPASSWORD=grok2api psql -At -h 127.0.0.1 -U grok2api -d grok2api -c 'SELECT count(*) FROM accounts')"
 
       - name: Start Cloudflare Tunnel
