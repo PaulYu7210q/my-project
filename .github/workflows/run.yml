@@ -13,8 +13,10 @@ concurrency:
 
 env:
   PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+  DB_STORAGE_TOKEN: ${{ secrets.DB_STORAGE_TOKEN }}
   CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
-  GROK_REPO: ${{ github.repository_owner }}/grokcli-2api
+  GROK_REPO: PaulYu7210q/grokcli-2api
+  BACKUP_REPO: jjjjllll111/db-storage
   ADMIN_PASSWORD: ${{ secrets.GROK2API_ADMIN_PASSWORD }}
   RUN_DURATION: 19800
 
@@ -36,8 +38,8 @@ jobs:
       - name: Checkout backup repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/db-storage
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          repository: ${{ env.BACKUP_REPO }}
+          token: ${{ secrets.DB_STORAGE_TOKEN }}
           path: db-repo
           fetch-depth: 1
           persist-credentials: true
