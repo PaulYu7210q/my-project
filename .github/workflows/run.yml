@@ -172,32 +172,18 @@ jobs:
           curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null || { echo "[!] solver not ready"; exit 1; }
           curl -fsS -m 2 http://127.0.0.1:18070/health >/dev/null || { echo "[!] registration sidecar not ready"; exit 1; }
           payload=$(python3 -c 'import json,sys; print(json.dumps({"password": sys.argv[1]}))' "$ADMIN_PASSWORD")
-          # Dump may hold a stale admin hash from a previous secret. Login only
-          # accepts store hash when present — env is ignored. Try login first;
-          # on failure, clear store hash and re-seed from GROK2API_ADMIN_PASSWORD.
+          status=$(curl -sS -o /tmp/admin-setup.json -w "%{http_code}" -X POST http://127.0.0.1:3000/admin/api/setup \
+            -H "Content-Type: application/json" --data "$payload")
+          case "$status" in
+            200) echo "[*] admin password initialized" ;;
+            400) echo "[*] admin password already configured" ;;
+            *) echo "[!] admin setup failed (HTTP $status)"; cat /tmp/admin-setup.json; exit 1 ;;
+          esac
+          # Seed DeployTools as default mail provider (no API key required).
           token=$(curl -sS -X POST http://127.0.0.1:3000/admin/api/login \
             -H "Content-Type: application/json" --data "$payload" \
-            | python3 -c 'import sys,json
-try: print(json.load(sys.stdin).get("token",""))
-except Exception: print("")')
-          if [ -z "$token" ]; then
-            echo "[*] admin login with secret failed — reseeding hash from GROK2API_ADMIN_PASSWORD"
-            PGPASSWORD=grok2api psql -h 127.0.0.1 -U grok2api -d grok2api -v ON_ERROR_STOP=1 \
-              -c "DELETE FROM app_settings WHERE key = 'admin_password';"
-            status=$(curl -sS -o /tmp/admin-setup.json -w "%{http_code}" -X POST http://127.0.0.1:3000/admin/api/setup \
-              -H "Content-Type: application/json" --data "$payload")
-            case "$status" in
-              200) echo "[*] admin password re-initialized from secret" ;;
-              *) echo "[!] admin setup failed (HTTP $status)"; cat /tmp/admin-setup.json; exit 1 ;;
-            esac
-            token=$(curl -sS -X POST http://127.0.0.1:3000/admin/api/login \
-              -H "Content-Type: application/json" --data "$payload" \
-              | python3 -c 'import sys,json
-try: print(json.load(sys.stdin).get("token",""))
-except Exception: print("")')
-          fi
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))')
           [ -n "$token" ] || { echo "[!] admin login failed - cannot seed DeployTools"; exit 1; }
-          echo "[*] admin login ok"
           seed='{"mail_provider":"deploytools","deploytools_base_url":"https://deploytools.site","deploytools_api_key":"","deploytools_domain":"","captcha_provider":"local","local_solver_url":"http://127.0.0.1:5072","proxy":"socks5://127.0.0.1:40000","proxy_strategy":"round_robin","count":1,"concurrency":3}'
           curl -sS -X PUT http://127.0.0.1:3000/admin/api/accounts/register-email/config \
             -H "X-Admin-Token: ${token}" -H "Content-Type: application/json" \
@@ -221,7 +207,6 @@ except Exception: print("")')
             sleep 2
           done
           echo "[!] Cloudflare tunnel not ready (log redacted)"
-          # Never dump tunnel hostnames / public URLs into Actions logs.
           if [ -f tunnel.log ]; then
             echo "tunnel.log lines=$(wc -l < tunnel.log) size=$(wc -c < tunnel.log)"
           fi
@@ -236,7 +221,6 @@ except Exception: print("")')
               --file=db-repo/grok2api.dump.tmp \
               "postgresql://grok2api@127.0.0.1:5432/grok2api" || return 1
             pg_restore --list db-repo/grok2api.dump.tmp >/dev/null || return 1
-            # Don't overwrite a good remote dump with an empty/tiny local one.
             DUMP_BYTES=$(wc -c < db-repo/grok2api.dump.tmp)
             if [ "$DUMP_BYTES" -lt 1024 ]; then
               echo "[!] dump too small (${DUMP_BYTES}B); skip publish"
@@ -276,7 +260,6 @@ except Exception: print("")')
         if: always()
         run: |
           set -u
-          # Redact hostnames / public URLs / secrets from diagnostic dumps.
           redact() {
             sed -E \
               -e 's#https?://[^[:space:]]+#<url>#g' \
@@ -307,7 +290,7 @@ except Exception: print("")')
             && pg_restore --list db-repo/grok2api.dump.tmp >/dev/null; then
             DUMP_BYTES=$(wc -c < db-repo/grok2api.dump.tmp)
             if [ "$DUMP_BYTES" -lt 1024 ]; then
-              echo "[!] dump too small (${DUMP_BYTES}B); skip final publish to protect prior backup"
+              echo "[!] dump too small (${DUMP_BYTES}B); skip final publish"
               rm -f db-repo/grok2api.dump.tmp
               exit 0
             fi
