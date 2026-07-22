@@ -14,7 +14,9 @@ concurrency:
 env:
   PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
   CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
-  GROK_REPO: ${{ github.repository_owner }}/grok-register-private
+  # Source app lives in grokcli-2api (not grok-register-private — that repo does not exist).
+  GROK_REPO: ${{ github.repository_owner }}/grokcli-2api
+  BACKUP_REPO: ${{ github.repository_owner }}/db-storage
   ADMIN_PASSWORD: ${{ secrets.GROK2API_ADMIN_PASSWORD }}
   RUN_DURATION: 19800
 
@@ -36,7 +38,7 @@ jobs:
       - name: Checkout backup repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/db-storage
+          repository: ${{ env.BACKUP_REPO }}
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: db-repo
           fetch-depth: 1
@@ -292,6 +294,11 @@ jobs:
             echo "lines=$(wc -l < tunnel.log) size=$(wc -c < tunnel.log)"
           else
             echo "missing"
+          fi
+          # Startup failed before checkout/db — skip final publish (nothing to dump).
+          if [ ! -d db-repo ]; then
+            echo "[!] db-repo missing (early failure); skip final publish"
+            exit 0
           fi
           PGPASSWORD=grok2api pg_dump --format=custom --no-owner --no-privileges \
             --file=db-repo/grok2api.dump.tmp \
