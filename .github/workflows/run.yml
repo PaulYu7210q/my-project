@@ -119,7 +119,8 @@ jobs:
         working-directory: grokcli-2api
         run: |
           set -Eeuo pipefail
-          [ -n "$ADMIN_PASSWORD" ] || { echo "[!] GROK2API_ADMIN_PASSWORD secret not set"; exit 1; }
+          # Dump restore already carries admin hash + registration config.
+          # Only require GROK2API_ADMIN_PASSWORD on a fresh DB (no admin in store).
           export PYTHONPATH="$PWD:$PWD/grok-build-auth${PYTHONPATH:+:$PYTHONPATH}"
           export DISPLAY=:99
           export GROK2API_RUNTIME=go
@@ -139,7 +140,10 @@ jobs:
           export GROK2API_REGISTRATION_SIDECAR=1 GROK2API_REGISTRATION_HOST=127.0.0.1 GROK2API_REGISTRATION_PORT=18070
           export GROK2API_REGISTRATION_SERVICE_URL=http://127.0.0.1:18070
           export GROK2API_XAI_PROXY=socks5://127.0.0.1:40000 GROK2API_PROXY=socks5://127.0.0.1:40000
-          export GROK2API_ADMIN_PASSWORD="$ADMIN_PASSWORD"
+          # Optional: only used when store has no admin hash (first bootstrap).
+          if [ -n "${ADMIN_PASSWORD:-}" ]; then
+            export GROK2API_ADMIN_PASSWORD="$ADMIN_PASSWORD"
+          fi
           mkdir -p bin turnstile-solver/logs turnstile-solver/keys
           go build -o bin/grok2api ./cmd/grok2api
           go build -o bin/grok2api-migrate ./cmd/grok2api-migrate
@@ -171,24 +175,26 @@ jobs:
           curl -fsS -m 2 http://127.0.0.1:3000/ready >/dev/null || { echo "[!] Go runtime never became ready"; tail -100 app.log || true; exit 1; }
           curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null || { echo "[!] solver not ready"; exit 1; }
           curl -fsS -m 2 http://127.0.0.1:18070/health >/dev/null || { echo "[!] registration sidecar not ready"; exit 1; }
-          payload=$(python3 -c 'import json,sys; print(json.dumps({"password": sys.argv[1]}))' "$ADMIN_PASSWORD")
-          status=$(curl -sS -o /tmp/admin-setup.json -w "%{http_code}" -X POST http://127.0.0.1:3000/admin/api/setup \
-            -H "Content-Type: application/json" --data "$payload")
-          case "$status" in
-            200) echo "[*] admin password initialized" ;;
-            400) echo "[*] admin password already configured" ;;
-            *) echo "[!] admin setup failed (HTTP $status)"; cat /tmp/admin-setup.json; exit 1 ;;
-          esac
-          # Seed DeployTools as default mail provider (no API key required).
-          token=$(curl -sS -X POST http://127.0.0.1:3000/admin/api/login \
-            -H "Content-Type: application/json" --data "$payload" \
-            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))')
-          [ -n "$token" ] || { echo "[!] admin login failed - cannot seed DeployTools"; exit 1; }
-          seed='{"mail_provider":"deploytools","deploytools_base_url":"https://deploytools.site","deploytools_api_key":"","deploytools_domain":"","captcha_provider":"local","local_solver_url":"http://127.0.0.1:5072","proxy":"socks5://127.0.0.1:40000","proxy_strategy":"round_robin","count":1,"concurrency":3}'
-          curl -sS -X PUT http://127.0.0.1:3000/admin/api/accounts/register-email/config \
-            -H "X-Admin-Token: ${token}" -H "Content-Type: application/json" \
-            --data "$seed" | head -c 400; echo
-          echo "[*] DeployTools registration config seeded"
+          # Backup dump owns admin password + registration config. Do not login/seed
+          # when admin already exists — avoids secret mismatch killing the run.
+          HAS_ADMIN=$(PGPASSWORD=grok2api psql -At -h 127.0.0.1 -U grok2api -d grok2api -c "SELECT COUNT(*) FROM app_settings WHERE key = 'admin_password'" 2>/dev/null || echo 0)
+          if [ "${HAS_ADMIN:-0}" -gt 0 ]; then
+            echo "[*] admin password present in restore; skip setup/login/seed"
+          else
+            [ -n "${ADMIN_PASSWORD:-}" ] || { echo "[!] empty DB needs GROK2API_ADMIN_PASSWORD secret"; exit 1; }
+            payload=$(python3 -c 'import json,sys; print(json.dumps({"password": sys.argv[1]}))' "$ADMIN_PASSWORD")
+            status=$(curl -sS -o /tmp/admin-setup.json -w "%{http_code}" -X POST http://127.0.0.1:3000/admin/api/setup -H "Content-Type: application/json" --data "$payload")
+            case "$status" in
+              200) echo "[*] admin password initialized" ;;
+              400) echo "[*] admin password already configured" ;;
+              *) echo "[!] admin setup failed (HTTP $status)"; cat /tmp/admin-setup.json; exit 1 ;;
+            esac
+            token=$(curl -sS -X POST http://127.0.0.1:3000/admin/api/login -H "Content-Type: application/json" --data "$payload" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))')
+            [ -n "$token" ] || { echo "[!] admin login failed - cannot seed DeployTools"; exit 1; }
+            seed='{"mail_provider":"deploytools","deploytools_base_url":"https://deploytools.site","deploytools_api_key":"","deploytools_domain":"","captcha_provider":"local","local_solver_url":"http://127.0.0.1:5072","proxy":"socks5://127.0.0.1:40000","proxy_strategy":"round_robin","count":1,"concurrency":3}'
+            curl -sS -X PUT http://127.0.0.1:3000/admin/api/accounts/register-email/config -H "X-Admin-Token: ${token}" -H "Content-Type: application/json" --data "$seed" | head -c 400; echo
+            echo "[*] DeployTools registration config seeded"
+          fi
           echo "[*] accounts=$(PGPASSWORD=grok2api psql -At -h 127.0.0.1 -U grok2api -d grok2api -c 'SELECT count(*) FROM accounts')"
 
       - name: Start Cloudflare Tunnel
