@@ -31,6 +31,8 @@ jobs:
           repository: ${{ env.GROK_REPO }}
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: grokcli-2api
+          fetch-depth: 1
+          persist-credentials: true
 
       - name: Checkout backup repository
         uses: actions/checkout@v4
@@ -314,3 +316,40 @@ jobs:
             rm -f db-repo/grok2api.dump.tmp
             echo "[!] final backup skipped: PostgreSQL unavailable"
           fi
+
+      - name: Sync sso_output to GROK_REPO
+        if: always()
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set -u
+          SSO_DIR=grokcli-2api/grok-build-auth/sso_output
+          if [ ! -d "$SSO_DIR" ]; then
+            echo "[*] no sso_output dir; skip"
+            exit 0
+          fi
+          # only real account files; skip empty
+          count=$(find "$SSO_DIR" -type f \( -name 'sso_*.json' -o -name '*.json' \) ! -name '.*' 2>/dev/null | wc -l)
+          if [ "${count:-0}" -eq 0 ]; then
+            echo "[*] sso_output empty; skip"
+            exit 0
+          fi
+          echo "[*] sso files=$count"
+          (
+            cd grokcli-2api
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            # sso_output/ is gitignored on purpose in source; force-add for backup push
+            git add -f grok-build-auth/sso_output/
+            if git diff --cached --quiet; then
+              echo "[*] sso_output unchanged; skip push"
+              exit 0
+            fi
+            git commit -m "sync sso_output ($(date -u +%Y-%m-%dT%H:%MZ))"
+            # ensure token remote (checkout usually sets this; re-set if missing)
+            if [ -n "${PRIVATE_REPO_TOKEN:-}" ]; then
+              git remote set-url origin "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/${GROK_REPO}.git"
+            fi
+            git push origin HEAD:main
+            echo "[*] sso_output pushed to ${GROK_REPO}"
+          ) || echo "[!] sso_output sync failed"
