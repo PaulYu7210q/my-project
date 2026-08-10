@@ -240,6 +240,7 @@ jobs:
               cd db-repo
               git config user.name "github-actions[bot]"
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git pull --rebase origin main || true
               git add grok2api.dump
               git commit -m "$message" --allow-empty
               git push origin HEAD:main
@@ -308,6 +309,7 @@ jobs:
               cd db-repo
               git config user.name "github-actions[bot]"
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git pull --rebase origin main || true
               git add grok2api.dump
               git commit -m "final backup" --allow-empty
               git push origin HEAD:main
