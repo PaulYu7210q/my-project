@@ -75,6 +75,23 @@ jobs:
           [ "$code" != "000" ] || { echo "[!] WARP SOCKS5 transport failed"; exit 1; }
           echo "[*] WARP SOCKS5 ready: 127.0.0.1:40000 (x.ai HTTP $code)"
 
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('grokcli-2api/requirements.txt', 'grokcli-2api/requirements-store.txt', 'grokcli-2api/turnstile-solver/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache Camoufox browser
+        id: camoufox-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/camoufox
+          key: ${{ runner.os }}-camoufox-${{ hashFiles('grokcli-2api/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-camoufox-
+
       - name: Install Python sidecar runtime
         working-directory: grokcli-2api
         run: |
@@ -84,11 +101,16 @@ jobs:
             libgbm1 libgtk-3-0 libasound2t64 libxss1 libxrandr2 libxkbcommon0 \
             libpango-1.0-0 libxshmfence1 libxcomposite1 libxdamage1 libxfixes3 \
             libxext6 fonts-liberation fonts-noto-color-emoji
-          python3 -m pip install --no-cache-dir -U pip
-          python3 -m pip install --no-cache-dir -r requirements.txt
-          python3 -m pip install --no-cache-dir -r requirements-store.txt
-          python3 -m pip install --no-cache-dir -r turnstile-solver/requirements.txt
-          python3 -m camoufox fetch
+          python3 -m pip install -U pip
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install -r requirements-store.txt
+          python3 -m pip install -r turnstile-solver/requirements.txt
+          # Skip browser download when camoufox cache already restored.
+          if [ "${{ steps.camoufox-cache.outputs.cache-hit }}" != "true" ]; then
+            python3 -m camoufox fetch
+          else
+            echo "[*] camoufox browser restored from cache; skip fetch"
+          fi
 
       - name: Build, migrate, and start Go runtime
         working-directory: grokcli-2api
