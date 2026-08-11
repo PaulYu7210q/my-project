@@ -2,6 +2,9 @@ name: Run Service
 
 on:
   workflow_dispatch:
+  schedule:
+    # 每小时运行一次（UTC）。GitHub 定时任务在高负载时可能延迟数分钟。
+    - cron: "7 * * * *"
 
 permissions:
   contents: read
@@ -193,7 +196,7 @@ jobs:
           fi
           echo "[*] accounts=$(PGPASSWORD=grok2api psql -At -h 127.0.0.1 -U grok2api -d grok2api -c 'SELECT count(*) FROM accounts')"
 
-      - name: Register 3 accounts (random no-key provider, concurrency 3)
+      - name: Register 400 accounts (random no-key provider, concurrency 4)
         run: |
           set -Eeuo pipefail
           curl -fsS -m 5 http://127.0.0.1:18070/health >/dev/null || { echo "[!] registration sidecar not ready"; exit 1; }
@@ -202,13 +205,14 @@ jobs:
           echo "[*] picked provider: ${PICK}"
           RESP=$(curl -sS -m 30 -X POST http://127.0.0.1:18070/internal/registration/v1/jobs \
             -H "Content-Type: application/json" \
-            -d "{\"mail_provider\":\"${PICK}\",\"count\":3,\"concurrency\":3,\"captcha_provider\":\"local\",\"local_solver_url\":\"http://127.0.0.1:5072\",\"proxy\":\"socks5://127.0.0.1:40000\",\"proxy_strategy\":\"round_robin\"}")
+            -d "{\"mail_provider\":\"${PICK}\",\"count\":400,\"concurrency\":4,\"captcha_provider\":\"local\",\"local_solver_url\":\"http://127.0.0.1:5072\",\"proxy\":\"socks5://127.0.0.1:40000\",\"proxy_strategy\":\"round_robin\"}")
           echo "[*] job response: $(echo "$RESP" | head -c 400)"
           BATCH_ID=$(echo "$RESP" | jq -r '.batch_id // .job_id // .id // .data.batch_id // empty' 2>/dev/null || echo "")
           echo "[*] batch_id: ${BATCH_ID:-<none>}"
           # Wait for the registration batch to finish (task-complete => end), then stop.
           # Batch terminal statuses per grok_build_adapter._batch_stats: done/partial/error/cancelled/stopped.
-          end=$((SECONDS + 1800))
+          # 400 accounts @ concurrency 4 → hours; cap at 5h (GitHub job limit is 6h).
+          end=$((SECONDS + 18000))
           while [ "$SECONDS" -lt "$end" ]; do
             kill -0 "$(cat /tmp/app.pid 2>/dev/null || echo 0)" 2>/dev/null || { echo "[!] Go runtime exited"; exit 1; }
             if [ -n "$BATCH_ID" ]; then
