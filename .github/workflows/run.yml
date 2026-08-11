@@ -13,9 +13,12 @@ concurrency:
 env:
   CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
   GROK_REPO: PaulYu7210q/grokcli-2api
-  BACKUP_REPO: jjjjllll111/db-storage
   ADMIN_PASSWORD: ${{ secrets.GROK2API_ADMIN_PASSWORD }}
   RUN_DURATION: 19800
+  SSO_SUPABASE_CONN: ${{ secrets.SSO_SUPABASE_CONN }}
+  SUB_API_URL: ${{ secrets.SUB_API_URL }}
+  SUB_ADMIN_USER: ${{ secrets.SUB_ADMIN_USER }}
+  SUB_ADMIN_PASS: ${{ secrets.SUB_ADMIN_PASS }}
 
 jobs:
   run:
@@ -34,32 +37,11 @@ jobs:
           fetch-depth: 1
           persist-credentials: true
 
-      - name: Checkout backup repository
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.BACKUP_REPO }}
-          token: ${{ secrets.DB_STORAGE_TOKEN }}
-          path: db-repo
-          fetch-depth: 1
-          persist-credentials: true
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: grokcli-2api/go.mod
           cache-dependency-path: grokcli-2api/go.sum
-
-      - name: Restore PostgreSQL backup
-        run: |
-          set -Eeuo pipefail
-          if [ -f db-repo/grok2api.dump ]; then
-            pg_restore --list db-repo/grok2api.dump >/dev/null
-            echo "pg_archive_restored=1" >> "$GITHUB_ENV"
-            echo "[*] PostgreSQL archive validated"
-          else
-            echo "pg_archive_restored=0" >> "$GITHUB_ENV"
-            echo "[*] no PostgreSQL archive; fresh Go schema will be created"
-          fi
 
       - name: Install Redis and PostgreSQL
         run: |
@@ -72,13 +54,6 @@ jobs:
           sudo -u postgres psql -c "CREATE DATABASE grok2api OWNER grok2api;" 2>/dev/null || true
           redis-cli ping
           sudo -u postgres psql -d grok2api -c "SELECT 1;"
-          if [ "${pg_archive_restored:-0}" = "1" ]; then
-            PGPASSWORD=grok2api pg_restore \
-              --exit-on-error --single-transaction --no-owner --no-privileges \
-              --dbname="postgresql://grok2api@127.0.0.1:5432/grok2api" \
-              db-repo/grok2api.dump
-            echo "[*] PostgreSQL restored from grok2api.dump"
-          fi
 
       - name: Install and start Cloudflare WARP SOCKS5 proxy
         run: |
@@ -121,8 +96,7 @@ jobs:
         working-directory: grokcli-2api
         run: |
           set -Eeuo pipefail
-          # Dump restore already carries admin hash + registration config.
-          # Only require GROK2API_ADMIN_PASSWORD on a fresh DB (no admin in store).
+          # No dump restore anymore: DB is always fresh, so admin setup always runs.
           export PYTHONPATH="$PWD:$PWD/grok-build-auth${PYTHONPATH:+:$PYTHONPATH}"
           export DISPLAY=:99
           export GROK2API_RUNTIME=go
@@ -220,34 +194,22 @@ jobs:
           fi
           exit 1
 
-      - name: Keep alive and back up PostgreSQL
+      - name: Register 400 accounts (random no-key provider, concurrency 4)
         run: |
           set -Eeuo pipefail
-          backup() {
-            local message="$1"
-            PGPASSWORD=grok2api pg_dump --format=custom --no-owner --no-privileges \
-              --file=db-repo/grok2api.dump.tmp \
-              "postgresql://grok2api@127.0.0.1:5432/grok2api" || return 1
-            pg_restore --list db-repo/grok2api.dump.tmp >/dev/null || return 1
-            DUMP_BYTES=$(wc -c < db-repo/grok2api.dump.tmp)
-            if [ "$DUMP_BYTES" -lt 1024 ]; then
-              echo "[!] dump too small (${DUMP_BYTES}B); skip publish"
-              rm -f db-repo/grok2api.dump.tmp
-              return 1
-            fi
-            mv db-repo/grok2api.dump.tmp db-repo/grok2api.dump
-            (
-              cd db-repo
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git pull --rebase origin main || true
-              git add grok2api.dump
-              git commit -m "$message" --allow-empty
-              git push origin HEAD:main
-            )
-          }
+          curl -fsS -m 5 http://127.0.0.1:18070/health >/dev/null || { echo "[!] registration sidecar not ready"; exit 1; }
+          PROVIDERS=(tempmail deploytools)
+          PICK=${PROVIDERS[$((RANDOM % ${#PROVIDERS[@]}))]}
+          echo "[*] picked provider: ${PICK}"
+          RESP=$(curl -sS -m 30 -X POST http://127.0.0.1:18070/internal/registration/v1/jobs \
+            -H "Content-Type: application/json" \
+            -d "{\"mail_provider\":\"${PICK}\",\"count\":400,\"concurrency\":4,\"captcha_provider\":\"local\",\"local_solver_url\":\"http://127.0.0.1:5072\",\"proxy\":\"socks5://127.0.0.1:40000\",\"proxy_strategy\":\"round_robin\"}")
+          echo "[*] job response: $(echo "$RESP" | head -c 400)"
+
+      - name: Keep alive service
+        run: |
+          set -Eeuo pipefail
           end=$((SECONDS + RUN_DURATION))
-          last=0
           while [ "$SECONDS" -lt "$end" ]; do
             app_pid=$(cat /tmp/app.pid 2>/dev/null || echo 0)
             tunnel_pid=$(cat /tmp/cloudflared.pid 2>/dev/null || echo 0)
@@ -257,15 +219,10 @@ jobs:
               echo "[!] cloudflared exited"
               exit 1
             fi
-            now=$(date +%s)
-            if [ $((now - last)) -ge 600 ]; then
-              backup "checkpoint" || echo "[!] checkpoint failed; retry next interval"
-              last=$now
-            fi
             sleep 30
           done
 
-      - name: Final diagnostics and PostgreSQL backup
+      - name: Final diagnostics
         if: always()
         run: |
           set -u
@@ -288,35 +245,6 @@ jobs:
             echo "lines=$(wc -l < tunnel.log) size=$(wc -c < tunnel.log)"
           else
             echo "missing"
-          fi
-          if [ ! -d db-repo ]; then
-            echo "[!] db-repo missing (early failure); skip final publish"
-            exit 0
-          fi
-          if PGPASSWORD=grok2api pg_dump --format=custom --no-owner --no-privileges \
-            --file=db-repo/grok2api.dump.tmp \
-            "postgresql://grok2api@127.0.0.1:5432/grok2api" \
-            && pg_restore --list db-repo/grok2api.dump.tmp >/dev/null; then
-            DUMP_BYTES=$(wc -c < db-repo/grok2api.dump.tmp)
-            if [ "$DUMP_BYTES" -lt 1024 ]; then
-              echo "[!] dump too small (${DUMP_BYTES}B); skip final publish"
-              rm -f db-repo/grok2api.dump.tmp
-              exit 0
-            fi
-            echo "[*] dump_bytes=${DUMP_BYTES}"
-            mv db-repo/grok2api.dump.tmp db-repo/grok2api.dump
-            (
-              cd db-repo
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git pull --rebase origin main || true
-              git add grok2api.dump
-              git commit -m "final backup" --allow-empty
-              git push origin HEAD:main
-            ) || echo "[!] final backup push failed"
-          else
-            rm -f db-repo/grok2api.dump.tmp
-            echo "[!] final backup skipped: PostgreSQL unavailable"
           fi
 
       - name: Sync sso_output to GROK_REPO
