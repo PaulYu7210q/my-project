@@ -11,10 +11,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
   GROK_REPO: PaulYu7210q/grokcli-2api
   ADMIN_PASSWORD: ${{ secrets.GROK2API_ADMIN_PASSWORD }}
-  RUN_DURATION: 19800
   SSO_SUPABASE_CONN: ${{ secrets.SSO_SUPABASE_CONN }}
   SUB_API_URL: ${{ secrets.SUB_API_URL }}
   SUB_ADMIN_USER: ${{ secrets.SUB_ADMIN_USER }}
@@ -173,28 +171,7 @@ jobs:
           fi
           echo "[*] accounts=$(PGPASSWORD=grok2api psql -At -h 127.0.0.1 -U grok2api -d grok2api -c 'SELECT count(*) FROM accounts')"
 
-      - name: Start Cloudflare Tunnel
-        run: |
-          set -Eeuo pipefail
-          [ -n "$CF_TUNNEL_TOKEN" ] || { echo "[!] CF_TUNNEL_TOKEN secret not set"; exit 1; }
-          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
-          chmod +x /usr/local/bin/cloudflared
-          nohup cloudflared tunnel --no-autoupdate run --token "$CF_TUNNEL_TOKEN" > tunnel.log 2>&1 &
-          echo $! > /tmp/cloudflared.pid
-          for _ in $(seq 1 30); do
-            if kill -0 "$(cat /tmp/cloudflared.pid)" 2>/dev/null && curl -fsS -m 3 https://xai.logincore.me/ready >/dev/null; then
-              echo "[*] Cloudflare tunnel ready"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "[!] Cloudflare tunnel not ready (log redacted)"
-          if [ -f tunnel.log ]; then
-            echo "tunnel.log lines=$(wc -l < tunnel.log) size=$(wc -c < tunnel.log)"
-          fi
-          exit 1
-
-      - name: Register 400 accounts (random no-key provider, concurrency 4)
+      - name: Register 3 accounts (random no-key provider, concurrency 3)
         run: |
           set -Eeuo pipefail
           curl -fsS -m 5 http://127.0.0.1:18070/health >/dev/null || { echo "[!] registration sidecar not ready"; exit 1; }
@@ -203,24 +180,24 @@ jobs:
           echo "[*] picked provider: ${PICK}"
           RESP=$(curl -sS -m 30 -X POST http://127.0.0.1:18070/internal/registration/v1/jobs \
             -H "Content-Type: application/json" \
-            -d "{\"mail_provider\":\"${PICK}\",\"count\":400,\"concurrency\":4,\"captcha_provider\":\"local\",\"local_solver_url\":\"http://127.0.0.1:5072\",\"proxy\":\"socks5://127.0.0.1:40000\",\"proxy_strategy\":\"round_robin\"}")
+            -d "{\"mail_provider\":\"${PICK}\",\"count\":3,\"concurrency\":3,\"captcha_provider\":\"local\",\"local_solver_url\":\"http://127.0.0.1:5072\",\"proxy\":\"socks5://127.0.0.1:40000\",\"proxy_strategy\":\"round_robin\"}")
           echo "[*] job response: $(echo "$RESP" | head -c 400)"
-
-      - name: Keep alive service
-        run: |
-          set -Eeuo pipefail
-          end=$((SECONDS + RUN_DURATION))
+          JOB_ID=$(echo "$RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("job_id") or d.get("id") or d.get("data",{}).get("job_id") or "")' 2>/dev/null || echo "")
+          echo "[*] job_id: ${JOB_ID:-<none>}"
+          # Wait for the registration job to finish (task-complete => end), then stop.
+          end=$((SECONDS + 1800))
           while [ "$SECONDS" -lt "$end" ]; do
-            app_pid=$(cat /tmp/app.pid 2>/dev/null || echo 0)
-            tunnel_pid=$(cat /tmp/cloudflared.pid 2>/dev/null || echo 0)
-            kill -0 "$app_pid" 2>/dev/null || { echo "[!] Go runtime exited"; exit 1; }
-            curl -fsS -m 3 http://127.0.0.1:3000/ready >/dev/null || { echo "[!] Go runtime not ready"; exit 1; }
-            if ! kill -0 "$tunnel_pid" 2>/dev/null; then
-              echo "[!] cloudflared exited"
-              exit 1
+            kill -0 "$(cat /tmp/app.pid 2>/dev/null || echo 0)" 2>/dev/null || { echo "[!] Go runtime exited"; exit 1; }
+            if [ -n "$JOB_ID" ]; then
+              ST=$(curl -sS -m 10 "http://127.0.0.1:18070/internal/registration/v1/jobs/${JOB_ID}" 2>/dev/null || echo "")
+              echo "[*] job status: $(echo "$ST" | head -c 300)"
+              echo "$ST" | grep -qiE '"status"[": ]+(done|completed|success|finished|failed|error)' && { echo "[*] job finished"; break; }
             fi
-            sleep 30
+            sso_count=$(find grokcli-2api/grok-build-auth/sso_output -name 'sso_*.json' 2>/dev/null | wc -l)
+            echo "[*] sso_output files so far: ${sso_count:-0}"
+            sleep 20
           done
+          echo "[*] registration wait done"
 
       - name: Final diagnostics
         if: always()
@@ -229,7 +206,6 @@ jobs:
           redact() {
             sed -E \
               -e 's#https?://[^[:space:]]+#<url>#g' \
-              -e 's#[A-Za-z0-9.-]+\.(trycloudflare\.com|cfargotunnel\.com)#<host>#g' \
               -e 's#("password"[[:space:]]*:[[:space:]]*")[^"]*"#\1***"#g' \
               -e 's#(token|authorization|cookie)[=: ]+[^[:space:]]+#\1=***#Ig' \
               || true
@@ -240,12 +216,6 @@ jobs:
           tail -100 grokcli-2api/turnstile-solver/logs/registration_sidecar.log 2>/dev/null | redact || true
           echo "=== solver (redacted) ==="
           tail -100 grokcli-2api/turnstile-solver/logs/turnstile_solver.log 2>/dev/null | redact || true
-          echo "=== tunnel (status only) ==="
-          if [ -f tunnel.log ]; then
-            echo "lines=$(wc -l < tunnel.log) size=$(wc -c < tunnel.log)"
-          else
-            echo "missing"
-          fi
 
       - name: Sync sso_output to GROK_REPO
         if: always()
