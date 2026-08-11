@@ -182,16 +182,21 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"mail_provider\":\"${PICK}\",\"count\":3,\"concurrency\":3,\"captcha_provider\":\"local\",\"local_solver_url\":\"http://127.0.0.1:5072\",\"proxy\":\"socks5://127.0.0.1:40000\",\"proxy_strategy\":\"round_robin\"}")
           echo "[*] job response: $(echo "$RESP" | head -c 400)"
-          JOB_ID=$(echo "$RESP" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("job_id") or d.get("id") or d.get("data",{}).get("job_id") or "")' 2>/dev/null || echo "")
-          echo "[*] job_id: ${JOB_ID:-<none>}"
-          # Wait for the registration job to finish (task-complete => end), then stop.
+          BATCH_ID=$(echo "$RESP" | jq -r '.batch_id // .job_id // .id // .data.batch_id // empty' 2>/dev/null || echo "")
+          echo "[*] batch_id: ${BATCH_ID:-<none>}"
+          # Wait for the registration batch to finish (task-complete => end), then stop.
+          # Batch terminal statuses per grok_build_adapter._batch_stats: done/partial/error/cancelled/stopped.
           end=$((SECONDS + 1800))
           while [ "$SECONDS" -lt "$end" ]; do
             kill -0 "$(cat /tmp/app.pid 2>/dev/null || echo 0)" 2>/dev/null || { echo "[!] Go runtime exited"; exit 1; }
-            if [ -n "$JOB_ID" ]; then
-              ST=$(curl -sS -m 10 "http://127.0.0.1:18070/internal/registration/v1/jobs/${JOB_ID}" 2>/dev/null || echo "")
-              echo "[*] job status: $(echo "$ST" | head -c 300)"
-              echo "$ST" | grep -qiE '"status"[": ]+(done|completed|success|finished|failed|error)' && { echo "[*] job finished"; break; }
+            if [ -n "$BATCH_ID" ]; then
+              ST=$(curl -sS -m 10 "http://127.0.0.1:18070/internal/registration/v1/batches/${BATCH_ID}" 2>/dev/null || echo "")
+              STATS=$(echo "$ST" | jq -rc '(.stats // .) | "status=\(.status) imported=\(.imported) error=\(.error) running=\(.running) done=\(.done)/\(.target)"' 2>/dev/null || echo "<no-status>")
+              echo "[*] batch: $STATS"
+              BSTAT=$(echo "$ST" | jq -r '(.stats // .).status // ""' 2>/dev/null | tr 'A-Z' 'a-z')
+              case "$BSTAT" in
+                done|partial|error|cancelled|stopped) echo "[*] batch finished: $BSTAT"; break ;;
+              esac
             fi
             sso_count=$(find grokcli-2api/grok-build-auth/sso_output -name 'sso_*.json' 2>/dev/null | wc -l)
             echo "[*] sso_output files so far: ${sso_count:-0}"
