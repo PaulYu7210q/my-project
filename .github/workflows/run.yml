@@ -29,7 +29,7 @@ jobs:
         shell: bash
 
     steps:
-      - name: Pre-flight: check sub.logincore.me backend
+      - name: "Pre-flight: check sub.logincore.me backend"
         run: |
           set -Eeuo pipefail
           # Cloudflare 托管前端，/ /health /ready 恒为 SPA HTML(200)。
