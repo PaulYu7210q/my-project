@@ -29,6 +29,16 @@ jobs:
         shell: bash
 
     steps:
+      - name: Pre-flight: check sub.logincore.me health
+        run: |
+          set -Eeuo pipefail
+          code=$(curl -sSL --max-time 20 --output /dev/null --write-out "%{http_code}" https://sub.logincore.me/ || true)
+          echo "[*] sub.logincore.me HTTP ${code:-000}"
+          case "${code:-000}" in
+            2*|3*) echo "[*] sub.logincore.me healthy; continue" ;;
+            *) echo "[!] sub.logincore.me unhealthy (HTTP ${code:-000}); abort this run"; exit 1 ;;
+          esac
+
       - name: Checkout grokcli-2api source
         uses: actions/checkout@v4
         with:
