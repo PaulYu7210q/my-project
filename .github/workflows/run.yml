@@ -124,7 +124,8 @@ jobs:
           printf 'socks5://127.0.0.1:40000\n' > turnstile-solver/proxies.txt
           export TURNSTILE_THREAD=1 TURNSTILE_LAZY=0 TURNSTILE_IDLE_SEC=0
           # api_solver.py 用相对导入（db_results/browser_configs），必须在其自身目录内启动
-          (cd turnstile-solver && nohup python3 api_solver.py > logs/turnstile_solver.log 2>&1 & echo $! > /tmp/turnstile.pid)
+          # 统一走 camoufox（已 fetch）；argparse 默认 chromium 会去找未安装的 patchright 浏览器
+          (cd turnstile-solver && nohup python3 api_solver.py --browser_type camoufox > logs/turnstile_solver.log 2>&1 & echo $! > /tmp/turnstile.pid)
           for _ in $(seq 1 60); do
             curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null && { echo "[*] local turnstile solver ready"; break; }
             sleep 2
