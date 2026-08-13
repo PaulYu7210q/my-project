@@ -123,8 +123,8 @@ jobs:
           mkdir -p turnstile-solver/logs turnstile-solver/keys
           printf 'socks5://127.0.0.1:40000\n' > turnstile-solver/proxies.txt
           export TURNSTILE_THREAD=1 TURNSTILE_LAZY=0 TURNSTILE_IDLE_SEC=0
-          nohup python3 turnstile-solver/api_solver.py > turnstile-solver/logs/turnstile_solver.log 2>&1 &
-          echo $! > /tmp/turnstile.pid
+          # api_solver.py 用相对导入（db_results/browser_configs），必须在其自身目录内启动
+          (cd turnstile-solver && nohup python3 api_solver.py > logs/turnstile_solver.log 2>&1 & echo $! > /tmp/turnstile.pid)
           for _ in $(seq 1 60); do
             curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null && { echo "[*] local turnstile solver ready"; break; }
             sleep 2
