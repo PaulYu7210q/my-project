@@ -15,11 +15,12 @@ concurrency:
 
 env:
   GROK_REPO: PaulYu7210q/grokcli-2api
-  ADMIN_PASSWORD: ${{ secrets.GROK2API_ADMIN_PASSWORD }}
-  SSO_SUPABASE_CONN: ${{ secrets.SSO_SUPABASE_CONN }}
+  # 远端 grok2api（账号密码推送，run.py 内置 remote-push 使用）
   SUB_API_URL: ${{ secrets.SUB_API_URL }}
   SUB_ADMIN_USER: ${{ secrets.SUB_ADMIN_USER }}
   SUB_ADMIN_PASS: ${{ secrets.SUB_ADMIN_PASS }}
+  YESCAPTCHA_API_KEY: ${{ secrets.YESCAPTCHA_API_KEY }}
+  TEMPMAIL_API_KEY: ${{ secrets.TEMPMAIL_API_KEY }}
 
 jobs:
   run:
@@ -29,19 +30,15 @@ jobs:
         shell: bash
 
     steps:
-      - name: "Pre-flight: check sub.logincore.me backend"
+      - name: "Pre-flight: check remote grok2api backend"
         run: |
           set -Eeuo pipefail
-          # Cloudflare 托管前端，/ /health /ready 恒为 SPA HTML(200)。
-          # 真后端存活铁证：POST /v1/chat/completions 返回 401 JSON；
-          # 后端挂了时 Cloudflare 回 HTML 错误页。
-          body=$(curl -sSL --max-time 20 https://sub.logincore.me/v1/models 2>/dev/null || true)
-          echo "[*] sub.logincore.me GET /v1/models probe"
-          if printf '%s' "$body" | grep -q '"error"'; then
-            echo "[*] backend alive (401 JSON error as expected)"
-          else
-            echo "[!] backend down: got HTML/other, not JSON"; exit 1
-          fi
+          [ -n "${SUB_API_URL:-}" ] || { echo "[!] SUB_API_URL secret missing"; exit 1; }
+          code=$(curl -sS --max-time 20 -o /dev/null -w "%{http_code}" "${SUB_API_URL}/admin/api/login" || true)
+          case "$code" in
+            200|400|401|405) echo "[*] remote grok2api reachable (HTTP $code)" ;;
+            *) echo "[!] remote grok2api unreachable (HTTP $code)"; exit 1 ;;
+          esac
 
       - name: Checkout grokcli-2api source
         uses: actions/checkout@v4
@@ -50,25 +47,6 @@ jobs:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: grokcli-2api
           fetch-depth: 1
-          persist-credentials: true
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: grokcli-2api/go.mod
-          cache-dependency-path: grokcli-2api/go.sum
-
-      - name: Install Redis and PostgreSQL
-        run: |
-          set -Eeuo pipefail
-          sudo apt update -qq
-          sudo apt install -y -qq redis-server postgresql postgresql-contrib
-          sudo systemctl start redis-server
-          sudo systemctl start postgresql
-          sudo -u postgres psql -c "CREATE USER grok2api WITH PASSWORD 'grok2api' SUPERUSER;" 2>/dev/null || true
-          sudo -u postgres psql -c "CREATE DATABASE grok2api OWNER grok2api;" 2>/dev/null || true
-          redis-cli ping
-          sudo -u postgres psql -d grok2api -c "SELECT 1;"
 
       - name: Install and start Cloudflare WARP SOCKS5 proxy
         run: |
@@ -96,7 +74,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('grokcli-2api/requirements.txt', 'grokcli-2api/requirements-store.txt', 'grokcli-2api/turnstile-solver/requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('grokcli-2api/grok-build-auth/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
@@ -105,140 +83,62 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/camoufox
-          key: ${{ runner.os }}-camoufox-${{ hashFiles('grokcli-2api/requirements.txt') }}
+          key: ${{ runner.os }}-camoufox-v1
           restore-keys: |
             ${{ runner.os }}-camoufox-
 
-      - name: Install Python sidecar runtime
+      - name: Install Python registration runtime
         working-directory: grokcli-2api
         run: |
           set -Eeuo pipefail
-          sudo apt install -y -qq xvfb python3 python3-pip \
+          sudo apt install -y -qq xvfb python3 python3-pip python3-requests \
             libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
             libgbm1 libgtk-3-0 libasound2t64 libxss1 libxrandr2 libxkbcommon0 \
             libpango-1.0-0 libxshmfence1 libxcomposite1 libxdamage1 libxfixes3 \
             libxext6 fonts-liberation fonts-noto-color-emoji
           python3 -m pip install -U pip
-          python3 -m pip install -r requirements.txt
-          python3 -m pip install -r requirements-store.txt
-          python3 -m pip install -r turnstile-solver/requirements.txt
-          # Skip browser download when camoufox cache already restored.
+          python3 -m pip install -r grok-build-auth/requirements.txt
+          # OAuth 阶段需要浏览器;注册主体走纯协议(无浏览器)。
           if [ "${{ steps.camoufox-cache.outputs.cache-hit }}" != "true" ]; then
             python3 -m camoufox fetch
           else
-            echo "[*] camoufox browser restored from cache; skip fetch"
+            echo "[*] camoufox restored from cache; skip fetch"
           fi
+          python3 -c "from xconsole_client import XConsoleAuthClient; print('[*] registration client import OK')"
+          # 本地打码服务（Camoufox 内嵌）：无 YESCAPTCHA_API_KEY 时 run.py 回落到这里
+          pip install -r turnstile-solver/requirements.txt
+          mkdir -p turnstile-solver/logs turnstile-solver/keys
+          printf 'socks5://127.0.0.1:40000\n' > turnstile-solver/proxies.txt
+          export TURNSTILE_THREAD=1 TURNSTILE_LAZY=0 TURNSTILE_IDLE_SEC=0
+          nohup python3 turnstile-solver/api_solver.py > turnstile-solver/logs/turnstile_solver.log 2>&1 &
+          echo $! > /tmp/turnstile.pid
+          for _ in $(seq 1 60); do
+            curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null && { echo "[*] local turnstile solver ready"; break; }
+            sleep 2
+          done
+          curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null || { echo "[!] local turnstile solver not ready"; tail -50 turnstile-solver/logs/turnstile_solver.log; exit 1; }
 
-      - name: Build, migrate, and start Go runtime
+      - name: Register accounts (tempmail/qxfy random, local captcha, push to remote grok2api)
         working-directory: grokcli-2api
         run: |
           set -Eeuo pipefail
-          # No dump restore anymore: DB is always fresh, so admin setup always runs.
-          export PYTHONPATH="$PWD:$PWD/grok-build-auth${PYTHONPATH:+:$PYTHONPATH}"
+          export PYTHONPATH="$PWD:$PWD/grok-build-auth"
           export DISPLAY=:99
-          export GROK2API_RUNTIME=go
-          export GROK2API_STORE_BACKEND=hybrid
-          export GROK2API_REQUIRE_SHARED_STORES=1
-          export GROK2API_REQUIRE_MIGRATIONS=1
-          export GROK2API_WORKERS=2
-          export REDIS_URL=redis://127.0.0.1:6379/0 GROK2API_REDIS_URL=redis://127.0.0.1:6379/0
-          export DATABASE_URL=postgresql://grok2api:grok2api@127.0.0.1:5432/grok2api
-          export GROK2API_DATABASE_URL=postgresql://grok2api:grok2api@127.0.0.1:5432/grok2api
-          export GROK2API_HOST=127.0.0.1 GROK2API_PORT=3000 GROK2API_OPEN_BROWSER=0
-          export GROK2API_GO_PUBLIC_READ=1 GROK2API_GO_CHAT=1 GROK2API_GO_MESSAGES=1 GROK2API_GO_RESPONSES=1
-          export GROK2API_GO_ADMIN_READ=1 GROK2API_GO_ADMIN_WRITE=1 GROK2API_GO_MAINTAINER=1 GROK2API_GO_WRITES=1
-          export GROK2API_GO_OWNERSHIP_MODE=all
-          export GROK2API_CAPTCHA_PROVIDER=local GROK2API_INLINE_SOLVER=0
-          export GROK2API_REGISTRATION_SIDECAR=1 GROK2API_REGISTRATION_HOST=127.0.0.1 GROK2API_REGISTRATION_PORT=18070
-          export GROK2API_REGISTRATION_SERVICE_URL=http://127.0.0.1:18070
-          export GROK2API_XAI_PROXY=socks5://127.0.0.1:40000 GROK2API_PROXY=socks5://127.0.0.1:40000
-          # Optional: only used when store has no admin hash (first bootstrap).
-          if [ -n "${ADMIN_PASSWORD:-}" ]; then
-            export GROK2API_ADMIN_PASSWORD="$ADMIN_PASSWORD"
-          fi
-          mkdir -p bin turnstile-solver/logs turnstile-solver/keys
-          go build -o bin/grok2api ./cmd/grok2api
-          go build -o bin/grok2api-migrate ./cmd/grok2api-migrate
-          ./bin/grok2api-migrate -dir migrations up
+          # 走 WARP 访问 x.ai
+          export HTTPS_PROXY=socks5h://127.0.0.1:40000
+          export HTTP_PROXY=socks5h://127.0.0.1:40000
+          # 本地打码（无 API 打码 key；run.py 见 LOCAL_SOLVER_URL 即回落）
+          export LOCAL_SOLVER_URL=http://127.0.0.1:5072
           Xvfb :99 -screen 0 1280x720x24 > xvfb.log 2>&1 &
-          printf 'socks5://127.0.0.1:40000\n' > turnstile-solver/proxies.txt
-          # Solver service disabled: Camoufox registration solves Turnstile inline in the
-          # registration browser (adapter: "external inline solver is optional, never block").
-          # Skipping api_solver.py frees ~8 resident Camoufox processes on the runner.
-          echo "[*] solver service skipped (Camoufox embedded turnstile)"
-          nohup python3 scripts/registration_service.py > turnstile-solver/logs/registration_sidecar.log 2>&1 &
-          echo $! > turnstile-solver/logs/registration_sidecar.pid
-          nohup ./bin/grok2api > app.log 2>&1 &
-          echo $! > /tmp/app.pid
-          for _ in $(seq 1 90); do
-            if curl -fsS -m 2 http://127.0.0.1:3000/ready >/dev/null; then
-              echo "[*] Go runtime ready"
-              break
-            fi
-            if ! kill -0 "$(cat /tmp/app.pid)" 2>/dev/null; then
-              echo "[!] Go runtime exited"
-              tail -100 app.log || true
-              exit 1
-            fi
-            sleep 2
-          done
-          curl -fsS -m 2 http://127.0.0.1:3000/ready >/dev/null || { echo "[!] Go runtime never became ready"; tail -100 app.log || true; exit 1; }
-          curl -fsS -m 2 http://127.0.0.1:18070/health >/dev/null || { echo "[!] registration sidecar not ready"; exit 1; }
-          # Backup dump owns admin password + registration config. Do not login/seed
-          # when admin already exists — avoids secret mismatch killing the run.
-          HAS_ADMIN=$(PGPASSWORD=grok2api psql -At -h 127.0.0.1 -U grok2api -d grok2api -c "SELECT COUNT(*) FROM app_settings WHERE key = 'admin_password'" 2>/dev/null || echo 0)
-          if [ "${HAS_ADMIN:-0}" -gt 0 ]; then
-            echo "[*] admin password present in restore; skip setup/login/seed"
-          else
-            [ -n "${ADMIN_PASSWORD:-}" ] || { echo "[!] empty DB needs GROK2API_ADMIN_PASSWORD secret"; exit 1; }
-            payload=$(python3 -c 'import json,sys; print(json.dumps({"password": sys.argv[1]}))' "$ADMIN_PASSWORD")
-            status=$(curl -sS -o /tmp/admin-setup.json -w "%{http_code}" -X POST http://127.0.0.1:3000/admin/api/setup -H "Content-Type: application/json" --data "$payload")
-            case "$status" in
-              200) echo "[*] admin password initialized" ;;
-              400) echo "[*] admin password already configured" ;;
-              *) echo "[!] admin setup failed (HTTP $status)"; cat /tmp/admin-setup.json; exit 1 ;;
-            esac
-            token=$(curl -sS -X POST http://127.0.0.1:3000/admin/api/login -H "Content-Type: application/json" --data "$payload" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))')
-            [ -n "$token" ] || { echo "[!] admin login failed - cannot seed DeployTools"; exit 1; }
-            seed='{"mail_provider":"deploytools","deploytools_base_url":"https://qxfy.store","deploytools_api_key":"","deploytools_domain":"","captcha_provider":"local","local_solver_url":"http://127.0.0.1:5072","proxy":"socks5://127.0.0.1:40000","proxy_strategy":"round_robin","count":1,"concurrency":3}'
-            curl -sS -X PUT http://127.0.0.1:3000/admin/api/accounts/register-email/config -H "X-Admin-Token: ${token}" -H "Content-Type: application/json" --data "$seed" | head -c 400; echo
-            echo "[*] DeployTools registration config seeded"
-          fi
-          echo "[*] accounts=$(PGPASSWORD=grok2api psql -At -h 127.0.0.1 -U grok2api -d grok2api -c 'SELECT count(*) FROM accounts')"
-
-      - name: Register 400 accounts (random no-key provider, concurrency 8)
-        run: |
-          set -Eeuo pipefail
-          curl -fsS -m 5 http://127.0.0.1:18070/health >/dev/null || { echo "[!] registration sidecar not ready"; exit 1; }
-          PROVIDERS=(tempmail deploytools)
-          PICK=${PROVIDERS[$((RANDOM % ${#PROVIDERS[@]}))]}
-          echo "[*] picked provider: ${PICK}"
-          RESP=$(curl -sS -m 30 -X POST http://127.0.0.1:18070/internal/registration/v1/jobs \
-            -H "Content-Type: application/json" \
-            -d "{\"mail_provider\":\"${PICK}\",\"count\":400,\"concurrency\":8,\"captcha_provider\":\"local\",\"proxy\":\"socks5://127.0.0.1:40000\",\"proxy_strategy\":\"round_robin\"}")
-          echo "[*] job response: $(echo "$RESP" | head -c 400)"
-          BATCH_ID=$(echo "$RESP" | jq -r '.batch_id // .job_id // .id // .data.batch_id // empty' 2>/dev/null || echo "")
-          echo "[*] batch_id: ${BATCH_ID:-<none>}"
-          # Wait for the registration batch to finish (task-complete => end), then stop.
-          # Batch terminal statuses per grok_build_adapter._batch_stats: done/partial/error/cancelled/stopped.
-          # 400 accounts @ concurrency 8 → hours; cap at 5h (GitHub job limit is 6h).
-          end=$((SECONDS + 18000))
-          while [ "$SECONDS" -lt "$end" ]; do
-            kill -0 "$(cat /tmp/app.pid 2>/dev/null || echo 0)" 2>/dev/null || { echo "[!] Go runtime exited"; exit 1; }
-            if [ -n "$BATCH_ID" ]; then
-              ST=$(curl -sS -m 10 "http://127.0.0.1:18070/internal/registration/v1/batches/${BATCH_ID}" 2>/dev/null || echo "")
-              STATS=$(echo "$ST" | jq -rc '(.stats // .) | "status=\(.status) imported=\(.imported) error=\(.error) running=\(.running) done=\(.done)/\(.target)"' 2>/dev/null || echo "<no-status>")
-              echo "[*] batch: $STATS"
-              BSTAT=$(echo "$ST" | jq -r '(.stats // .).status // ""' 2>/dev/null | tr 'A-Z' 'a-z')
-              case "$BSTAT" in
-                done|partial|error|cancelled|stopped) echo "[*] batch finished: $BSTAT"; break ;;
-              esac
-            fi
-            sso_count=$(find grokcli-2api/grok-build-auth/sso_output -name 'sso_*.json' 2>/dev/null | wc -l)
-            echo "[*] sso_output files so far: ${sso_count:-0}"
-            sleep 20
-          done
-          echo "[*] registration wait done"
+          mkdir -p grok-build-auth/sso_output
+          # 400 账号 / 并发 8 ≈ 数小时;GitHub job 上限 6h,内部计数自停。
+          # --email auto = 每账号随机 tempmail / deploytools(qxfy)；成功即 POST 远端 import-sso，本地不落库。
+          timeout 19000 python3 grok-build-auth/run.py \
+            --count 400 \
+            --threads 8 \
+            --email auto \
+            --no-oauth || true
+          echo "[*] sso_output files: $(find grok-build-auth/sso_output -name 'sso_*.json' 2>/dev/null | wc -l)"
 
       - name: Final diagnostics
         if: always()
@@ -246,51 +146,13 @@ jobs:
           set -u
           redact() {
             sed -E \
-              -e 's#https?://[^[:space:]]+#<url>#g' \
               -e 's#("password"[[:space:]]*:[[:space:]]*")[^"]*"#\1***"#g' \
-              -e 's#(token|authorization|cookie)[=: ]+[^[:space:]]+#\1=***#Ig' \
+              -e 's#(token|authorization|cookie|sso)[=: ]+[^[:space:]]+#\1=***#Ig' \
               || true
           }
-          echo "=== Go app (redacted) ==="
-          tail -100 grokcli-2api/app.log 2>/dev/null | redact || true
-          echo "=== registration sidecar (redacted) ==="
-          tail -100 grokcli-2api/turnstile-solver/logs/registration_sidecar.log 2>/dev/null | redact || true
-          echo "=== solver (redacted) ==="
-          tail -100 grokcli-2api/turnstile-solver/logs/turnstile_solver.log 2>/dev/null | redact || true
-
-      - name: Sync sso_output to GROK_REPO
-        if: always()
-        env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          set -u
-          SSO_DIR=grokcli-2api/grok-build-auth/sso_output
-          if [ ! -d "$SSO_DIR" ]; then
-            echo "[*] no sso_output dir; skip"
-            exit 0
-          fi
-          # only real account files; skip empty
-          count=$(find "$SSO_DIR" -type f \( -name 'sso_*.json' -o -name '*.json' \) ! -name '.*' 2>/dev/null | wc -l)
-          if [ "${count:-0}" -eq 0 ]; then
-            echo "[*] sso_output empty; skip"
-            exit 0
-          fi
-          echo "[*] sso files=$count"
-          (
-            cd grokcli-2api
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            # sso_output/ is gitignored on purpose in source; force-add for backup push
-            git add -f grok-build-auth/sso_output/
-            if git diff --cached --quiet; then
-              echo "[*] sso_output unchanged; skip push"
-              exit 0
-            fi
-            git commit -m "sync sso_output ($(date -u +%Y-%m-%dT%H:%MZ))"
-            # ensure token remote (checkout usually sets this; re-set if missing)
-            if [ -n "${PRIVATE_REPO_TOKEN:-}" ]; then
-              git remote set-url origin "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/${GROK_REPO}.git"
-            fi
-            git push origin HEAD:main
-            echo "[*] sso_output pushed to ${GROK_REPO}"
-          ) || echo "[!] sso_output sync failed"
+          echo "=== remote push status ==="
+          curl -sS --max-time 15 -u "${SUB_ADMIN_USER}:${SUB_ADMIN_PASS}" \
+            "${SUB_API_URL}/admin/api/accounts" 2>/dev/null | head -c 400 || echo "[!] cannot query remote accounts"
+          echo
+          echo "=== sso_output sample (redacted) ==="
+          ls -la grokcli-2api/grok-build-auth/sso_output 2>/dev/null | tail -5 || true
