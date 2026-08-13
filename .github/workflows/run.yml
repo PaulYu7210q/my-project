@@ -2,6 +2,15 @@ name: Run Service
 
 on:
   workflow_dispatch:
+    inputs:
+      count:
+        description: "注册账号数量"
+        required: false
+        default: "400"
+      threads:
+        description: "并发线程数"
+        required: false
+        default: "8"
   schedule:
     # 每小时运行一次（UTC）。GitHub 定时任务在高负载时可能延迟数分钟。
     - cron: "7 * * * *"
@@ -19,8 +28,10 @@ env:
   SUB_API_URL: ${{ secrets.SUB_API_URL }}
   SUB_ADMIN_USER: ${{ secrets.SUB_ADMIN_USER }}
   SUB_ADMIN_PASS: ${{ secrets.SUB_ADMIN_PASS }}
+  # 可选：YESCAPTCHA_API_KEY 不设则走本地 Camoufox solver
   YESCAPTCHA_API_KEY: ${{ secrets.YESCAPTCHA_API_KEY }}
-  TEMPMAIL_API_KEY: ${{ secrets.TEMPMAIL_API_KEY }}
+  # tempmail.lol 免费档无需 key，注释掉即可
+  # TEMPMAIL_API_KEY: ${{ secrets.TEMPMAIL_API_KEY }}
 
 jobs:
   run:
@@ -132,12 +143,12 @@ jobs:
           Xvfb :99 -screen 0 1280x720x24 > xvfb.log 2>&1 &
           mkdir -p grok-build-auth/sso_output
           # 400 账号 / 并发 8 ≈ 数小时;GitHub job 上限 6h,内部计数自停。
-          # --email auto = 每账号随机 tempmail / deploytools(qxfy)；成功即 POST 远端 import-sso，本地不落库。
+          # --email auto = 每账号随机 tempmail / deploytools(qxfy)；OAuth 导出 Build token。
+          # 成功即 POST {SUB_API_URL}/admin/api/accounts/import-sso(账号密码)，本地不落库。
           timeout 19000 python3 grok-build-auth/run.py \
-            --count 400 \
-            --threads 8 \
-            --email auto \
-            --no-oauth || true
+            --count "${{ github.event.inputs.count || '400' }}" \
+            --threads "${{ github.event.inputs.threads || '8' }}" \
+            --email auto || true
           echo "[*] sso_output files: $(find grok-build-auth/sso_output -name 'sso_*.json' 2>/dev/null | wc -l)"
 
       - name: Final diagnostics
