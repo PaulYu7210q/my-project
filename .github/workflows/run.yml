@@ -109,6 +109,8 @@ jobs:
             libxext6 fonts-liberation fonts-noto-color-emoji
           python3 -m pip install -U pip
           python3 -m pip install -r grok-build-auth/requirements.txt
+          # camoufox 在 turnstile-solver 依赖里；必须先装它才能 camoufox fetch
+          python3 -m pip install -r turnstile-solver/requirements.txt
           # OAuth 阶段需要浏览器;注册主体走纯协议(无浏览器)。
           if [ "${{ steps.camoufox-cache.outputs.cache-hit }}" != "true" ]; then
             python3 -m camoufox fetch
@@ -117,7 +119,6 @@ jobs:
           fi
           python3 -c "from xconsole_client import XConsoleAuthClient; print('[*] registration client import OK')"
           # 本地打码服务（Camoufox 内嵌）：无 YESCAPTCHA_API_KEY 时 run.py 回落到这里
-          pip install -r turnstile-solver/requirements.txt
           mkdir -p turnstile-solver/logs turnstile-solver/keys
           printf 'socks5://127.0.0.1:40000\n' > turnstile-solver/proxies.txt
           export TURNSTILE_THREAD=1 TURNSTILE_LAZY=0 TURNSTILE_IDLE_SEC=0
