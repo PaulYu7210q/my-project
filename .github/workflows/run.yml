@@ -117,6 +117,7 @@ jobs:
           else
             echo "[*] camoufox restored from cache; skip fetch"
           fi
+          export PYTHONPATH="$PWD:$PWD/grok-build-auth"
           python3 -c "from xconsole_client import XConsoleAuthClient; print('[*] registration client import OK')"
           # 本地打码服务（Camoufox 内嵌）：无 YESCAPTCHA_API_KEY 时 run.py 回落到这里
           mkdir -p turnstile-solver/logs turnstile-solver/keys
