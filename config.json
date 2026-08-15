@@ -1,0 +1,30 @@
+{
+  "proxy": "socks5://127.0.0.1:40000",
+  "allow_proxy_fallback": false,
+  "browser_engine": "chromium",
+  "enable_nsfw": true,
+  "register_count": 100,
+  "round_timeout_sec": 600,
+  "email_provider": "tempmail_lol",
+  "email_failover": true,
+  "email_providers": [
+    "tempmail_lol",
+    "qxfy",
+    "cfworker",
+    "maliapi",
+    "luckmail",
+    "skymail",
+    "cloudmail",
+    "freemail",
+    "opentrashmail",
+    "laoudo",
+    "yyds"
+  ],
+  "moemail_api_url": "https://sall.cc",
+  "maliapi_base_url": "https://maliapi.215.im/v1",
+  "luckmail_base_url": "https://mails.luckyous.com/",
+  "luckmail_project_code": "grok",
+  "skymail_api_base": "https://api.skymail.ink",
+  "grok2api_auto_add_local": true,
+  "grok2api_pool_name": "ssoBasic"
+}

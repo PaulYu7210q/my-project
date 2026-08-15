@@ -6,14 +6,14 @@ on:
       count:
         description: "注册账号数量"
         required: false
-        default: "400"
+        default: "100"
       threads:
         description: "并发线程数"
         required: false
-        default: "8"
+        default: "2"
   schedule:
-    # 每小时运行一次（UTC）。GitHub 定时任务在高负载时可能延迟数分钟。
-    - cron: "7 * * * *"
+    # 每 3 小时运行一次（UTC）。GitHub 定时任务在高负载时可能延迟数分钟。
+    - cron: "7 */3 * * *"
 
 permissions:
   contents: read
@@ -24,14 +24,6 @@ concurrency:
 
 env:
   GROK_REPO: PaulYu7210q/grokcli-2api
-  # 远端 grok2api（账号密码推送，run.py 内置 remote-push 使用）
-  SUB_API_URL: ${{ secrets.SUB_API_URL }}
-  SUB_ADMIN_USER: ${{ secrets.SUB_ADMIN_USER }}
-  SUB_ADMIN_PASS: ${{ secrets.SUB_ADMIN_PASS }}
-  # 可选：YESCAPTCHA_API_KEY 不设则走本地 Camoufox solver
-  YESCAPTCHA_API_KEY: ${{ secrets.YESCAPTCHA_API_KEY }}
-  # tempmail.lol 免费档无需 key，注释掉即可
-  # TEMPMAIL_API_KEY: ${{ secrets.TEMPMAIL_API_KEY }}
 
 jobs:
   run:
@@ -41,21 +33,14 @@ jobs:
         shell: bash
 
     steps:
-      - name: "Pre-flight: check remote grok2api backend"
-        run: |
-          set -Eeuo pipefail
-          [ -n "${SUB_API_URL:-}" ] || { echo "[!] SUB_API_URL secret missing"; exit 1; }
-          code=$(curl -sS --max-time 20 -o /dev/null -w "%{http_code}" "${SUB_API_URL}/admin/api/login" || true)
-          case "$code" in
-            200|400|401|405) echo "[*] remote grok2api reachable (HTTP $code)" ;;
-            *) echo "[!] remote grok2api unreachable (HTTP $code)"; exit 1 ;;
-          esac
+      # config.json 存在本私有仓库（免 secrets）。先检出本仓库拿配置。
+      - name: Checkout winrunner (config source)
+        uses: actions/checkout@v4
 
-      - name: Checkout grokcli-2api source
+      - name: Checkout grokcli-2api source (main)
         uses: actions/checkout@v4
         with:
           repository: ${{ env.GROK_REPO }}
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: grokcli-2api
           fetch-depth: 1
 
@@ -85,9 +70,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('grokcli-2api/grok-build-auth/requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('grokcli-2api/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
+          # config.json 变更也应失效 pip 缓存
 
       - name: Cache Camoufox browser
         id: camoufox-cache
@@ -108,23 +94,18 @@ jobs:
             libpango-1.0-0 libxshmfence1 libxcomposite1 libxdamage1 libxfixes3 \
             libxext6 fonts-liberation fonts-noto-color-emoji
           python3 -m pip install -U pip
-          python3 -m pip install -r grok-build-auth/requirements.txt
-          # camoufox 在 turnstile-solver 依赖里；必须先装它才能 camoufox fetch
+          python3 -m pip install -r requirements.txt
           python3 -m pip install -r turnstile-solver/requirements.txt
-          # OAuth 阶段需要浏览器;注册主体走纯协议(无浏览器)。
           if [ "${{ steps.camoufox-cache.outputs.cache-hit }}" != "true" ]; then
             python3 -m camoufox fetch
           else
             echo "[*] camoufox restored from cache; skip fetch"
           fi
-          export PYTHONPATH="$PWD:$PWD/grok-build-auth"
-          python3 -c "from xconsole_client import XConsoleAuthClient; print('[*] registration client import OK')"
-          # 本地打码服务（Camoufox 内嵌）：无 YESCAPTCHA_API_KEY 时 run.py 回落到这里
+          export PYTHONPATH="$PWD"
+          python3 -c "import grok_register_ttk; print('[*] registration import OK')"
           mkdir -p turnstile-solver/logs turnstile-solver/keys
           printf 'socks5://127.0.0.1:40000\n' > turnstile-solver/proxies.txt
           export TURNSTILE_THREAD=1 TURNSTILE_LAZY=0 TURNSTILE_IDLE_SEC=0
-          # api_solver.py 用相对导入（db_results/browser_configs），必须在其自身目录内启动
-          # 统一走 camoufox（已 fetch）；argparse 默认 chromium 会去找未安装的 patchright 浏览器
           (cd turnstile-solver && nohup python3 api_solver.py --browser_type camoufox > logs/turnstile_solver.log 2>&1 & echo $! > /tmp/turnstile.pid)
           for _ in $(seq 1 60); do
             curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null && { echo "[*] local turnstile solver ready"; break; }
@@ -132,41 +113,33 @@ jobs:
           done
           curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null || { echo "[!] local turnstile solver not ready"; tail -50 turnstile-solver/logs/turnstile_solver.log; exit 1; }
 
-      - name: Register accounts (tempmail/qxfy random, local captcha, push to remote grok2api)
+      # config.json 从本仓库拷入运行目录（私有仓库免 secrets；公开仓库只在构建时注入运行）
+      - name: Inject config.json
+        run: |
+          set -Eeuo pipefail
+          cp config.json grokcli-2api/config.json
+          echo "[*] config.json injected: $(grep -c '"' config.json) lines"
+
+      - name: Register accounts (fresh browser per account, threads=2)
         working-directory: grokcli-2api
         run: |
           set -Eeuo pipefail
-          export PYTHONPATH="$PWD:$PWD/grok-build-auth"
+          export PYTHONPATH="$PWD"
           export DISPLAY=:99
-          # 走 WARP 访问 x.ai
           export HTTPS_PROXY=socks5h://127.0.0.1:40000
           export HTTP_PROXY=socks5h://127.0.0.1:40000
-          # 本地打码（无 API 打码 key；run.py 见 LOCAL_SOLVER_URL 即回落）
           export LOCAL_SOLVER_URL=http://127.0.0.1:5072
           Xvfb :99 -screen 0 1280x720x24 > xvfb.log 2>&1 &
-          mkdir -p grok-build-auth/sso_output
-          # 400 账号 / 并发 8 ≈ 数小时;GitHub job 上限 6h,内部计数自停。
-          # --email auto = 每账号随机 tempmail / deploytools(qxfy)；OAuth 导出 Build token。
-          # 成功即 POST {SUB_API_URL}/admin/api/accounts/import-sso(账号密码)，本地不落库。
-          timeout 19000 python3 grok-build-auth/run.py \
-            --count "${{ github.event.inputs.count || '400' }}" \
-            --threads "${{ github.event.inputs.threads || '8' }}" \
-            --email auto || true
-          echo "[*] sso_output files: $(find grok-build-auth/sso_output -name 'sso_*.json' 2>/dev/null | wc -l)"
+          mkdir -p grokcli-2api
+          # 100 账号 / 并发 2。每账号独立浏览器实例（_register_one 内置 restart）。
+          timeout 19000 python3 grok_register_ttk.py \
+            --count "${{ github.event.inputs.count || '100' }}" \
+            --threads "${{ github.event.inputs.threads || '2' }}" || true
+          echo "[*] done"
 
       - name: Final diagnostics
         if: always()
         run: |
           set -u
-          redact() {
-            sed -E \
-              -e 's#("password"[[:space:]]*:[[:space:]]*")[^"]*"#\1***"#g' \
-              -e 's#(token|authorization|cookie|sso)[=: ]+[^[:space:]]+#\1=***#Ig' \
-              || true
-          }
-          echo "=== remote push status ==="
-          curl -sS --max-time 15 -u "${SUB_ADMIN_USER}:${SUB_ADMIN_PASS}" \
-            "${SUB_API_URL}/admin/api/accounts" 2>/dev/null | head -c 400 || echo "[!] cannot query remote accounts"
-          echo
-          echo "=== sso_output sample (redacted) ==="
-          ls -la grokcli-2api/grok-build-auth/sso_output 2>/dev/null | tail -5 || true
+          echo "=== accounts saved ==="
+          ls -la grokcli-2api/accounts_*.txt 2>/dev/null | tail -5 || true
