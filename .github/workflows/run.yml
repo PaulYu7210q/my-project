@@ -43,6 +43,7 @@ jobs:
           repository: ${{ env.GROK_REPO }}
           path: grokcli-2api
           fetch-depth: 1
+          token: ${{ secrets.GROKCLI_PAT }}
 
       - name: Install and start Cloudflare WARP SOCKS5 proxy
         run: |
@@ -130,7 +131,6 @@ jobs:
           export HTTP_PROXY=socks5h://127.0.0.1:40000
           export LOCAL_SOLVER_URL=http://127.0.0.1:5072
           Xvfb :99 -screen 0 1280x720x24 > xvfb.log 2>&1 &
-          mkdir -p grokcli-2api
           # 100 账号 / 并发 2。每账号独立浏览器实例（_register_one 内置 restart）。
           timeout 19000 python3 grok_register_ttk.py \
             --count "${{ github.event.inputs.count || '100' }}" \
