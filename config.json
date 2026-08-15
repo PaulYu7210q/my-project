@@ -1,7 +1,7 @@
 {
   "proxy": "socks5://127.0.0.1:40000",
   "allow_proxy_fallback": false,
-  "browser_engine": "chromium",
+  "browser_engine": "camoufox",
   "enable_nsfw": true,
   "register_count": 100,
   "round_timeout_sec": 600,
