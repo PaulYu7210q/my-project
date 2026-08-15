@@ -6,11 +6,11 @@ on:
       count:
         description: "注册账号数量"
         required: false
-        default: "100"
+        default: "150"
       threads:
         description: "并发线程数"
         required: false
-        default: "2"
+        default: "3"
   schedule:
     # 每 3 小时运行一次（UTC）。GitHub 定时任务在高负载时可能延迟数分钟。
     - cron: "7 */3 * * *"
