@@ -85,6 +85,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-camoufox-
 
+      - name: Inject grok_register_ttk.py (local script into checked-out source)
+        run: |
+          set -Eeuo pipefail
+          cp -f grok_register_ttk.py grokcli-2api/grok_register_ttk.py
+          echo "[*] injected grok_register_ttk.py: $(wc -c < grokcli-2api/grok_register_ttk.py) bytes"
+
       - name: Install Python registration runtime
         working-directory: grokcli-2api
         run: |
@@ -115,12 +121,6 @@ jobs:
           curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null || { echo "[!] local turnstile solver not ready"; tail -50 turnstile-solver/logs/turnstile_solver.log; exit 1; }
 
       # config.json 从本仓库拷入运行目录（私有仓库免 secrets；公开仓库只在构建时注入运行）
-      - name: Inject grok_register_ttk.py (local script into checked-out source)
-        run: |
-          set -Eeuo pipefail
-          cp -f grok_register_ttk.py grokcli-2api/grok_register_ttk.py
-          echo "[*] injected grok_register_ttk.py: $(wc -c < grokcli-2api/grok_register_ttk.py) bytes"
-
       - name: Inject config.json
         run: |
           set -Eeuo pipefail
