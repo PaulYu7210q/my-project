@@ -121,13 +121,6 @@ jobs:
           done
           curl -fsS -m 2 http://127.0.0.1:5072/health >/dev/null || { echo "[!] local turnstile solver not ready"; tail -50 turnstile-solver/logs/turnstile_solver.log; exit 1; }
 
-      # config.json 从本仓库拷入运行目录（私有仓库免 secrets；公开仓库只在构建时注入运行）
-      - name: Inject config.json
-        run: |
-          set -Eeuo pipefail
-          cp config.json grokcli-2api/config.json
-          echo "[*] config.json injected: $(grep -c '"' config.json) lines"
-
       - name: Register accounts (fresh browser per account, threads=2)
         working-directory: grokcli-2api
         run: |
