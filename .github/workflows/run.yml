@@ -85,11 +85,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-camoufox-
 
-      - name: Inject grok_register_ttk.py (local script into checked-out source)
+      - name: Inject local requirements and script into checked-out source
         run: |
           set -Eeuo pipefail
+          cp -f requirements.txt grokcli-2api/requirements.txt
           cp -f grok_register_ttk.py grokcli-2api/grok_register_ttk.py
-          echo "[*] injected grok_register_ttk.py: $(wc -c < grokcli-2api/grok_register_ttk.py) bytes"
+          echo "[*] injected requirements.txt + grok_register_ttk.py"
 
       - name: Install Python registration runtime
         working-directory: grokcli-2api
